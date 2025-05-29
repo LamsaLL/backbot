@@ -3,6 +3,7 @@ import Order from "../Backpack/Authenticated/Order.js";
 import OrderController from "../Controllers/OrderController.js";
 import AccountController from "../Controllers/AccountController.js";
 import Markets from "../Backpack/Public/Markets.js";
+import RiskManager from "../Risk/RiskManager.js";
 import { Candle, Position } from "../types/index.js";
 
 interface AnalysisResult {
@@ -21,10 +22,47 @@ interface SupportResistance {
 }
 
 class Decision {
+  private riskManager: RiskManager;
+
+  constructor() {
+    // Initialize risk manager with environment-based configuration
+    this.riskManager = new RiskManager({
+      maxRiskPerTrade: parseFloat(process.env.MAX_RISK_PER_TRADE || "0.02"),
+      maxDailyLoss: parseFloat(process.env.MAX_DAILY_LOSS || "0.05"),
+      maxTotalExposure: parseFloat(process.env.MAX_TOTAL_EXPOSURE || "0.80"),
+      maxOpenPositions: parseInt(process.env.LIMIT_ORDER || "5"),
+      minVolumeUSD: parseFloat(process.env.MIN_VOLUME_USD || "100"),
+      maxVolumeUSD: parseFloat(process.env.MAX_VOLUME_USD || "5000"),
+      stopLossRequired: process.env.REQUIRE_STOP_LOSS === "true",
+      maxLeverage: parseInt(process.env.MAX_LEVERAGE || "10"),
+    });
+  }
+
   async analyze(): Promise<void> {
     try {
       const positions = await Futures.getOpenPositions();
       const Account = await AccountController.get();
+
+      // Check if trading should be halted due to daily losses
+      const haltCheck = this.riskManager.shouldHaltTrading(Account.capitalAvailable);
+      if (haltCheck.halt) {
+        console.log(`🚨 Trading halted: ${haltCheck.reason}`);
+        return;
+      }
+
+      // Get current risk metrics
+      const riskMetrics = this.riskManager.getRiskMetrics(positions || [], Account.capitalAvailable);
+      console.log(`📊 Risk Metrics:
+        - Total Positions: ${riskMetrics.totalPositions}/${Account.maxOpenOrders || 'N/A'}
+        - Portfolio Exposure: ${riskMetrics.exposurePercentage.toFixed(1)}%
+        - Daily P&L: ${riskMetrics.dailyPnLPercentage >= 0 ? '+' : ''}${riskMetrics.dailyPnLPercentage.toFixed(2)}%
+        - Can Open New: ${riskMetrics.canOpenNewPosition ? 'Yes' : 'No'}`);
+
+      if (!riskMetrics.canOpenNewPosition) {
+        console.log("⚠️ Cannot open new positions - risk limit reached");
+        return;
+      }
+
       const markets = Account.markets.map((el) => el.symbol);
       const symbol_opend = positions?.map((el: Position) => el.symbol) || [];
       const schedule_ordens = await OrderController.getAllOrdersSchedule(
@@ -64,17 +102,66 @@ class Decision {
           if (marketPrice === 0) continue;
 
           const dataset = this.analyzeMAEMACross(candles, marketPrice);
-          dataset.volume = Account.minVolumeDollar;
+          
+          // Calculate safe position size using risk manager
+          const { stopLoss, takeProfit } = this.findSupportResistance(
+            candles,
+            marketPrice
+          );
+
+          const safeVolume = this.riskManager.calculateSafePositionSize(
+            marketPrice,
+            stopLoss || marketPrice * 0.95, // Use 5% stop loss if none found
+            Account.capitalAvailable,
+            parseFloat(process.env.MAX_RISK_PER_TRADE || "0.02")
+          );
+
+          dataset.volume = Math.max(safeVolume, Account.minVolumeDollar);
           dataset.market = market;
 
           if (dataset.action !== "NEUTRAL") {
-            const { stopLoss, takeProfit } = this.findSupportResistance(
-              candles,
-              marketPrice
-            );
-
             dataset.stop = stopLoss;
             dataset.target = takeProfit;
+
+            // VALIDATE POSITION WITH RISK MANAGER
+            const validation = await this.riskManager.validateNewPosition(
+              market,
+              dataset.volume!,
+              dataset.entry!,
+              stopLoss,
+              Account.capitalAvailable,
+              positions || [],
+              Account.leverage
+            );
+
+            if (!validation.isValid) {
+              console.log(`❌ Position rejected for ${market}: ${validation.reason}`);
+              
+              if (validation.suggestedVolume && validation.suggestedVolume > Account.minVolumeDollar) {
+                console.log(`💡 Using suggested volume: $${validation.suggestedVolume.toFixed(2)}`);
+                dataset.volume = validation.suggestedVolume;
+                
+                // Re-validate with suggested volume
+                const revalidation = await this.riskManager.validateNewPosition(
+                  market,
+                  dataset.volume,
+                  dataset.entry!,
+                  stopLoss,
+                  Account.capitalAvailable,
+                  positions || [],
+                  Account.leverage
+                );
+                
+                if (!revalidation.isValid) {
+                  console.log(`❌ Re-validation failed: ${revalidation.reason}`);
+                  continue; // Skip this trade
+                }
+              } else {
+                continue; // Skip this trade
+              }
+            } else {
+              console.log(`✅ Position validated for ${market} - Risk: ${validation.riskPercentage?.toFixed(2)}%`);
+            }
 
             const orders = await OrderController.getRecentOpenOrders(market);
 
@@ -209,6 +296,29 @@ class Decision {
       stopLoss: support,
       takeProfit: resistance,
     };
+  }
+
+  /**
+   * Update P&L when a position is closed
+   */
+  updateTradeResult(pnl: number): void {
+    this.riskManager.updateDailyPnL(pnl);
+  }
+
+  /**
+   * Get current risk metrics
+   */
+  async getCurrentRiskMetrics(): Promise<any> {
+    const positions = await Futures.getOpenPositions();
+    const account = await AccountController.get();
+    return this.riskManager.getRiskMetrics(positions || [], account.capitalAvailable);
+  }
+
+  /**
+   * Get risk manager instance for external use
+   */
+  getRiskManager(): RiskManager {
+    return this.riskManager;
   }
 }
 

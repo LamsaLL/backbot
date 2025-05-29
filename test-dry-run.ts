@@ -1,9 +1,9 @@
 import dotenv from "dotenv";
-import Decision from "./src/Decision/Decision";
-import TrailingStop from "./src/TrailingStop/TrailingStop";
-import AccountController from "./src/Controllers/AccountController";
-import Markets from "./src/Backpack/Public/Markets";
-import Futures from "./src/Backpack/Authenticated/Futures";
+import Decision from "./src/Decision/Decision.js";
+import TrailingStop from "./src/TrailingStop/TrailingStop.js";
+import AccountController from "./src/Controllers/AccountController.js";
+import Markets from "./src/Backpack/Public/Markets.js";
+import Futures from "./src/Backpack/Authenticated/Futures.js";
 
 dotenv.config();
 

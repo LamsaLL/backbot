@@ -7,6 +7,7 @@
     "test": "node --loader ts-node/esm test-system.ts",
     "test:dry": "node --loader ts-node/esm test-dry-run.ts",
     "test:connection": "node --loader ts-node/esm test-connection.ts",
+    "account": "node --loader ts-node/esm account-info.ts",
     "start": "nodemon --exec \"node --loader ts-node/esm\" app.ts",
     "dev": "node --loader ts-node/esm app.ts",
     "build": "tsc",

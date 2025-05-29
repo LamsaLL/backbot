@@ -1,6 +1,7 @@
 import Order from "../Backpack/Authenticated/Order.js";
 import AccountController from "./AccountController.js";
 import Utils from "../Utils/Utils.js";
+import Decision from "../Decision/Decision.js";
 import {
   Position,
   TradeSignal,
