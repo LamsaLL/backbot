@@ -18,6 +18,17 @@ interface ProcessedPosition {
   quantity: number;
   volume: number;
   isLong: boolean;
+  entryPrice: number;
+  // Add dual exit tracking
+  hasPartialExit?: boolean;
+  remainingQuantity?: number;
+}
+
+interface ATRTrailingParams {
+  atrValue: number;
+  trailMultiplier: number;
+  partialExitRR: number;
+  partialExitPct: number;
 }
 
 interface ProcessedOrder {
@@ -55,19 +66,29 @@ class TrailingStop {
       quantity,
       volume: quantity * markPrice,
       isLong,
+      entryPrice,
+      hasPartialExit: false, // This would need to be tracked in position metadata
+      remainingQuantity: quantity,
     };
   }
 
-  async processOrders(isLong: boolean, symbol: string): Promise<ProcessedOrder[]> {
+  async processOrders(
+    isLong: boolean,
+    symbol: string
+  ): Promise<ProcessedOrder[]> {
     const orders = await Order.getOpenOrders(symbol);
     if (!orders) return [];
 
     const sortedOrders = isLong
       ? orders.sort(
-          (a, b) => parseFloat(a.triggerPrice || "0") - parseFloat(b.triggerPrice || "0")
+          (a, b) =>
+            parseFloat(a.triggerPrice || "0") -
+            parseFloat(b.triggerPrice || "0")
         )
       : orders.sort(
-          (a, b) => parseFloat(b.triggerPrice || "0") - parseFloat(a.triggerPrice || "0")
+          (a, b) =>
+            parseFloat(b.triggerPrice || "0") -
+            parseFloat(a.triggerPrice || "0")
         );
 
     return sortedOrders.map((el) => ({
@@ -77,18 +98,59 @@ class TrailingStop {
     }));
   }
 
-  calculateTrailingGap(candles: Candle[], marketPrice: number, isLong: boolean): number {
+  calculateTrailingGap(
+    candles: Candle[],
+    marketPrice: number,
+    isLong: boolean
+  ): number {
     if (!candles || candles.length < 5) return 0;
 
     const recentCandles = candles.slice(-5);
-    let recentBottom = Math.min(...recentCandles.map(c => parseFloat(c.low)));
-    let recentTop = Math.max(...recentCandles.map(c => parseFloat(c.high)));
+    let recentBottom = Math.min(...recentCandles.map((c) => parseFloat(c.low)));
+    let recentTop = Math.max(...recentCandles.map((c) => parseFloat(c.high)));
 
-    const trailingGap = isLong 
-      ? marketPrice - recentBottom 
+    const trailingGap = isLong
+      ? marketPrice - recentBottom
       : recentTop - marketPrice;
 
     return Math.max(trailingGap, 0);
+  }
+
+  /**
+   * Calculate ATR-based trailing stop for Pine Script fidelity
+   */
+  calculateATRTrailingStop(
+    candles: Candle[],
+    entryPrice: number,
+    currentPrice: number,
+    isLong: boolean,
+    params: ATRTrailingParams
+  ): { partialTarget: number; trailingStop: number } {
+    if (!candles || candles.length < 14) {
+      // Fallback to basic calculation
+      const stopDist = Math.abs(currentPrice - entryPrice) * 0.02; // 2% fallback
+      return {
+        partialTarget: isLong
+          ? entryPrice + stopDist * params.partialExitRR
+          : entryPrice - stopDist * params.partialExitRR,
+        trailingStop: isLong
+          ? currentPrice - params.atrValue * params.trailMultiplier
+          : currentPrice + params.atrValue * params.trailMultiplier,
+      };
+    }
+
+    // Use ATR for precise trailing
+    const atrTrailDistance = params.atrValue * params.trailMultiplier;
+    const partialDistance = params.atrValue * params.partialExitRR;
+
+    return {
+      partialTarget: isLong
+        ? entryPrice + partialDistance
+        : entryPrice - partialDistance,
+      trailingStop: isLong
+        ? currentPrice - atrTrailDistance
+        : currentPrice + atrTrailDistance,
+    };
   }
 
   async stopLoss(): Promise<void> {
@@ -100,24 +162,32 @@ class TrailingStop {
 
       for (const position of positions) {
         const processedPosition = this.processPosition(position, Account.fee);
-        
+
         // Get market analysis
-        const analysis = await Markets.getCandlesAnalysis(processedPosition.symbol);
+        const analysis = await Markets.getCandlesAnalysis(
+          processedPosition.symbol
+        );
         if (!analysis) continue;
 
         const { candles, volume24h, price } = analysis;
-        
+
         // Check volume threshold
         const minVolumeThreshold = Account.minVolumeDollar * 0.1;
         if (volume24h < minVolumeThreshold) {
-          console.log(`⚠️ Low volume for ${processedPosition.symbol}, force closing`);
+          console.log(
+            `⚠️ Low volume for ${processedPosition.symbol}, force closing`
+          );
           await OrderController.forceClose(position);
           continue;
         }
 
         // Calculate trailing stop
-        const trailingGap = this.calculateTrailingGap(candles, price, processedPosition.isLong);
-        
+        const trailingGap = this.calculateTrailingGap(
+          candles,
+          price,
+          processedPosition.isLong
+        );
+
         if (trailingGap === 0) continue;
 
         // Determine new stop price
@@ -137,20 +207,26 @@ class TrailingStop {
         }
 
         // Check existing orders and update if necessary
-        const existingOrders = await this.processOrders(processedPosition.isLong, processedPosition.symbol);
-        
+        const existingOrders = await this.processOrders(
+          processedPosition.isLong,
+          processedPosition.symbol
+        );
+
         let shouldCreateNewStop = true;
-        
+
         for (const order of existingOrders) {
           const priceDiff = Math.abs(order.triggerPrice - newStopPrice);
           const priceThreshold = price * 0.001; // 0.1% threshold
-          
+
           if (priceDiff < priceThreshold) {
             shouldCreateNewStop = false;
             break;
           } else {
             // Cancel old stop and create new one
-            await OrderController.cancelStopTS(processedPosition.symbol, order.id);
+            await OrderController.cancelStopTS(
+              processedPosition.symbol,
+              order.id
+            );
           }
         }
 
@@ -160,12 +236,19 @@ class TrailingStop {
               symbol: processedPosition.symbol,
               price: newStopPrice,
               isLong: processedPosition.isLong,
-              quantity: processedPosition.quantity
+              quantity: processedPosition.quantity,
             });
-            
-            console.log(`📊 Updated trailing stop for ${processedPosition.symbol}: ${newStopPrice.toFixed(4)}`);
+
+            console.log(
+              `📊 Updated trailing stop for ${
+                processedPosition.symbol
+              }: ${newStopPrice.toFixed(4)}`
+            );
           } catch (error) {
-            console.error(`❌ Failed to create trailing stop for ${processedPosition.symbol}:`, error);
+            console.error(
+              `❌ Failed to create trailing stop for ${processedPosition.symbol}:`,
+              error
+            );
           }
         }
       }

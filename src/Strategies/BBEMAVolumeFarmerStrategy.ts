@@ -21,6 +21,11 @@ export class BBEMAVolumeFarmerStrategy implements IStrategy {
   private maxDD = 22; // 22%
   private dailyLossPerc = 2.5; // 2.5%
 
+  // Drawdown tracking
+  private peakEquity = 0;
+  private todaysStartEquity = 0;
+  private lastEquityReset = new Date().toDateString();
+
   private bbLen = 20;
   private bbMult = 2.0;
   private emaFastLen = 21;
@@ -74,6 +79,8 @@ export class BBEMAVolumeFarmerStrategy implements IStrategy {
 
     console.log(`🎯 ${this.name} strategy initialized with config:`, {
       riskPerc: this.riskPerc,
+      maxDD: this.maxDD,
+      dailyLossPerc: this.dailyLossPerc,
       bbLen: this.bbLen,
       emaFastLen: this.emaFastLen,
       emaSlowLen: this.emaSlowLen,
@@ -136,6 +143,55 @@ export class BBEMAVolumeFarmerStrategy implements IStrategy {
         symbol: market.symbol,
         marketPrice: 0,
         reason: "Unable to get current price",
+      };
+    }
+
+    // === DRAWDOWN PROTECTION ===
+    const currentEquity = account.capitalAvailable;
+    const today = new Date().toDateString();
+
+    // Reset daily tracking if new day
+    if (today !== this.lastEquityReset) {
+      this.todaysStartEquity = currentEquity;
+      this.lastEquityReset = today;
+    }
+
+    // Update peak equity
+    if (currentEquity > this.peakEquity) {
+      this.peakEquity = currentEquity;
+    }
+
+    // Calculate drawdowns
+    const equityDD =
+      this.peakEquity > 0
+        ? ((this.peakEquity - currentEquity) / this.peakEquity) * 100
+        : 0;
+    const dailyLoss =
+      this.todaysStartEquity > 0
+        ? ((this.todaysStartEquity - currentEquity) / this.todaysStartEquity) *
+          100
+        : 0;
+
+    // Check drawdown limits
+    if (equityDD > this.maxDD) {
+      return {
+        action: "NEUTRAL",
+        symbol: market.symbol,
+        marketPrice: currentPrice,
+        reason: `Max drawdown exceeded: ${equityDD.toFixed(2)}% > ${
+          this.maxDD
+        }%`,
+      };
+    }
+
+    if (dailyLoss > this.dailyLossPerc) {
+      return {
+        action: "NEUTRAL",
+        symbol: market.symbol,
+        marketPrice: currentPrice,
+        reason: `Daily loss limit exceeded: ${dailyLoss.toFixed(2)}% > ${
+          this.dailyLossPerc
+        }%`,
       };
     }
 
@@ -272,16 +328,16 @@ export class BBEMAVolumeFarmerStrategy implements IStrategy {
     if (longSig) {
       action = "LONG";
       stopLoss = entry - stopDist;
-      takeProfit1 = entry + stopDist * this.partialRR;
-      takeProfit2 = entry + stopDist * this.rewardRR;
+      takeProfit1 = entry + stopDist * this.partialRR; // 40% exit at 0.7RR
+      takeProfit2 = entry + stopDist * this.rewardRR; // 60% trails to 2.5RR
 
       // Update state to track last entry
       this.updateSymbolState(market.symbol, currentBarIndex);
     } else if (shortSig) {
       action = "SHORT";
       stopLoss = entry + stopDist;
-      takeProfit1 = entry - stopDist * this.partialRR;
-      takeProfit2 = entry - stopDist * this.rewardRR;
+      takeProfit1 = entry - stopDist * this.partialRR; // 40% exit at 0.7RR
+      takeProfit2 = entry - stopDist * this.rewardRR; // 60% trails to 2.5RR
 
       // Update state to track last entry
       this.updateSymbolState(market.symbol, currentBarIndex);

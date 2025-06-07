@@ -251,6 +251,17 @@ class Decision {
           );
 
           if (!strategyResult || strategyResult.action === "NEUTRAL") {
+            // Check if this is a drawdown protection halt
+            if (
+              strategyResult?.reason?.includes("drawdown") ||
+              strategyResult?.reason?.includes("loss limit")
+            ) {
+              console.log(
+                `🚨 ${market}: Strategy risk protection - ${strategyResult.reason}`
+              );
+              // If strategy halts due to drawdown, we should halt all trading
+              return;
+            }
             console.log(
               `😴 ${market}: ${strategyResult?.reason || "No signal"}`
             );
@@ -272,6 +283,27 @@ class Decision {
             target:
               strategyResult.takeProfit1 || strategyResult.takeProfit || null,
           };
+
+          // Store dual exit information for later use by trailing stop
+          if (
+            strategyResult.takeProfit1 &&
+            strategyResult.takeProfit2 &&
+            strategyResult.partialClosePct
+          ) {
+            // Log dual exit strategy info
+            console.log(`🎯 Dual Exit Setup for ${market}:
+              - Partial TP1 (${
+                strategyResult.partialClosePct
+              }%): ${strategyResult.takeProfit1.toFixed(4)}
+              - Trailing TP2 (${
+                100 - strategyResult.partialClosePct
+              }%): ${strategyResult.takeProfit2.toFixed(4)}
+              - ATR Trail: ${
+                strategyResult.trailingStopParams?.trailOffsetPoints?.toFixed(
+                  4
+                ) || "N/A"
+              }`);
+          }
 
           // Calculate safe position size using risk manager if not provided by strategy
           if (!strategyResult.volume) {
