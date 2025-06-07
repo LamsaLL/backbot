@@ -1,6 +1,54 @@
 # 🧪 Backbot Testing Guide
 
-This guide will help you thoroughly test your Backbot trading system before running it live.
+This guide will help you thoroughly test your Backbot trading system using the comprehensive test suite.
+
+## 🚀 Quick Start
+
+Run all tests:
+
+```bash
+npm test
+```
+
+Run specific test suites:
+
+```bash
+npm run test:offline    # Logic tests (no API required)
+npm run test:connection # API connectivity tests
+npm run test:strategy   # Trading strategy tests
+npm run test:system     # Integration tests
+```
+
+## 📋 Test Suites
+
+### 1. Offline Tests (`test:offline`)
+
+- **No API required** - Safe to run anytime
+- Tests mathematical indicators (SMA, EMA, Bollinger Bands)
+- Tests risk calculations and trading logic
+- Tests trend analysis algorithms
+
+### 2. Connection Tests (`test:connection`)
+
+- Tests API connectivity to Backpack Exchange
+- Validates environment variables
+- Tests public API endpoints (markets, system status)
+- Tests authenticated API access
+
+### 3. Strategy Tests (`test:strategy`)
+
+- Tests strategy factory and initialization
+- Tests BBEMA Volume Farmer strategy
+- Tests custom configuration handling
+- Tests strategy analysis with mock data
+
+### 4. System Integration Tests (`test:system`)
+
+- Tests integration between components
+- Tests account controller and order controller
+- Tests risk manager validation
+- Tests environment configuration
+- **Warning check**: Alerts if running in LIVE mode
 
 ## 🔧 Prerequisites
 

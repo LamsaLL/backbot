@@ -27,12 +27,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*", "*.ts"],
-  "exclude": [
-    "node_modules",
-    "dist",
-    "**/*.js",
-    "test-dry-simple.ts",
-    "test-offline.ts"
-  ]
+  "include": ["src/**/*", "tests/**/*", "*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.js"]
 }
