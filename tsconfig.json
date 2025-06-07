@@ -28,5 +28,11 @@
     }
   },
   "include": ["src/**/*", "*.ts"],
-  "exclude": ["node_modules", "dist", "**/*.js", "test-dry-simple.ts", "test-offline.ts"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.js",
+    "test-dry-simple.ts",
+    "test-offline.ts"
+  ]
 }

@@ -4,7 +4,13 @@ import OrderController from "../Controllers/OrderController.js";
 import AccountController from "../Controllers/AccountController.js";
 import Markets from "../Backpack/Public/Markets.js";
 import RiskManager from "../Risk/RiskManager.js";
-import { Candle, Position } from "../types/index.js";
+import { Candle, Position, Market } from "../types/index.js";
+import {
+  StrategyFactory,
+  IStrategy,
+  AnalysisResult as StrategyAnalysisResult,
+  AccountData,
+} from "../Strategies/index.js";
 
 interface AnalysisResult {
   action: "LONG" | "SHORT" | "NEUTRAL";
@@ -23,6 +29,8 @@ interface SupportResistance {
 
 class Decision {
   private riskManager: RiskManager;
+  private currentStrategy: IStrategy | null = null;
+  private strategyName: string;
 
   constructor() {
     // Initialize risk manager with environment-based configuration
@@ -36,27 +44,113 @@ class Decision {
       stopLossRequired: process.env.REQUIRE_STOP_LOSS === "true",
       maxLeverage: parseInt(process.env.MAX_LEVERAGE || "10"),
     });
+
+    // Initialize strategy
+    this.strategyName = process.env.TRADING_STRATEGY || "BBEMA_VOLUME_FARMER";
+    this.initializeStrategy();
+  }
+
+  private async initializeStrategy(): Promise<void> {
+    try {
+      // Get strategy configuration from environment variables
+      const strategyConfig = this.getStrategyConfigFromEnv();
+
+      this.currentStrategy = await StrategyFactory.initializeStrategy(
+        this.strategyName,
+        strategyConfig
+      );
+
+      console.log(
+        `🎯 Trading strategy initialized: ${this.currentStrategy.name}`
+      );
+    } catch (error) {
+      console.error(
+        `❌ Failed to initialize strategy "${this.strategyName}":`,
+        error
+      );
+      console.log("🔄 Falling back to default BBEMA_VOLUME_FARMER strategy");
+
+      // Fallback to default strategy
+      this.currentStrategy = await StrategyFactory.initializeStrategy(
+        "BBEMA_VOLUME_FARMER",
+        {}
+      );
+    }
+  }
+
+  private getStrategyConfigFromEnv(): Record<string, string> {
+    const config: Record<string, string> = {};
+
+    // Get all environment variables that start with strategy prefixes
+    const envVars = process.env;
+    const strategyPrefixes = ["BBEMA_"];
+
+    for (const [key, value] of Object.entries(envVars)) {
+      if (
+        strategyPrefixes.some((prefix) => key.startsWith(prefix)) &&
+        value !== undefined
+      ) {
+        config[key] = value;
+      }
+    }
+
+    return config;
+  }
+
+  async switchStrategy(
+    strategyName: string,
+    config?: Record<string, string>
+  ): Promise<void> {
+    try {
+      const strategyConfig = config || this.getStrategyConfigFromEnv();
+      this.currentStrategy = await StrategyFactory.initializeStrategy(
+        strategyName,
+        strategyConfig
+      );
+      this.strategyName = strategyName;
+      console.log(`🔄 Switched to strategy: ${this.currentStrategy.name}`);
+    } catch (error) {
+      console.error(
+        `❌ Failed to switch to strategy "${strategyName}":`,
+        error
+      );
+      throw error;
+    }
   }
 
   async analyze(): Promise<void> {
     try {
+      // Ensure strategy is initialized
+      if (!this.currentStrategy) {
+        await this.initializeStrategy();
+      }
+
       const positions = await Futures.getOpenPositions();
       const Account = await AccountController.get();
 
       // Check if trading should be halted due to daily losses
-      const haltCheck = this.riskManager.shouldHaltTrading(Account.capitalAvailable);
+      const haltCheck = this.riskManager.shouldHaltTrading(
+        Account.capitalAvailable
+      );
       if (haltCheck.halt) {
         console.log(`🚨 Trading halted: ${haltCheck.reason}`);
         return;
       }
 
       // Get current risk metrics
-      const riskMetrics = this.riskManager.getRiskMetrics(positions || [], Account.capitalAvailable);
+      const riskMetrics = this.riskManager.getRiskMetrics(
+        positions || [],
+        Account.capitalAvailable
+      );
       console.log(`📊 Risk Metrics:
-        - Total Positions: ${riskMetrics.totalPositions}/${Account.maxOpenOrders || 'N/A'}
+        - Total Positions: ${riskMetrics.totalPositions}/${
+        Account.maxOpenOrders || "N/A"
+      }
         - Portfolio Exposure: ${riskMetrics.exposurePercentage.toFixed(1)}%
-        - Daily P&L: ${riskMetrics.dailyPnLPercentage >= 0 ? '+' : ''}${riskMetrics.dailyPnLPercentage.toFixed(2)}%
-        - Can Open New: ${riskMetrics.canOpenNewPosition ? 'Yes' : 'No'}`);
+        - Daily P&L: ${
+          riskMetrics.dailyPnLPercentage >= 0 ? "+" : ""
+        }${riskMetrics.dailyPnLPercentage.toFixed(2)}%
+        - Can Open New: ${riskMetrics.canOpenNewPosition ? "Yes" : "No"}`);
 
       if (!riskMetrics.canOpenNewPosition) {
         console.log("⚠️ Cannot open new positions - risk limit reached");
@@ -101,80 +195,162 @@ class Decision {
           );
           if (marketPrice === 0) continue;
 
-          const dataset = this.analyzeMAEMACross(candles, marketPrice);
-          
-          // Calculate safe position size using risk manager
-          const { stopLoss, takeProfit } = this.findSupportResistance(
+          // Find market data
+          const marketData = Account.markets.find((m) => m.symbol === market);
+          if (!marketData) continue;
+
+          // Convert AccountController market format to Market interface
+          const fullMarketData: Market = {
+            symbol: marketData.symbol,
+            baseSymbol: marketData.symbol.split("-")[0] || marketData.symbol,
+            quoteSymbol: marketData.symbol.split("-")[1] || "USD",
+            decimal_price: marketData.decimal_price,
+            decimal_quantity: marketData.decimal_quantity,
+            minOrderSize: Account.minVolumeDollar,
+            tickSize: Math.pow(10, -marketData.decimal_price),
+            marketType: "PERP",
+            orderBookState: "Open",
+          };
+
+          // Create AccountData for strategy with converted markets
+          const accountData: AccountData = {
+            capitalAvailable: Account.capitalAvailable,
+            leverage: Account.leverage,
+            maxOpenOrders: Account.maxOpenOrders || 5,
+            minVolumeDollar: Account.minVolumeDollar,
+            markets: Account.markets.map((m) => ({
+              symbol: m.symbol,
+              baseSymbol: m.symbol.split("-")[0] || m.symbol,
+              quoteSymbol: m.symbol.split("-")[1] || "USD",
+              decimal_price: m.decimal_price,
+              decimal_quantity: m.decimal_quantity,
+              minOrderSize: Account.minVolumeDollar,
+              tickSize: Math.pow(10, -m.decimal_price),
+              marketType: "PERP",
+              orderBookState: "Open",
+            })),
+          };
+
+          // Get positions for this symbol
+          const openPositionsForSymbol =
+            positions?.filter((p) => p.symbol === market) || [];
+
+          // Ensure strategy is initialized
+          if (!this.currentStrategy) {
+            console.log("⚠️ Strategy not initialized, skipping analysis");
+            continue;
+          }
+
+          // Use the current strategy to analyze
+          const strategyResult = await this.currentStrategy.analyze(
             candles,
-            marketPrice
+            fullMarketData,
+            accountData,
+            openPositionsForSymbol,
+            positions || []
           );
 
-          const safeVolume = this.riskManager.calculateSafePositionSize(
-            marketPrice,
-            stopLoss || marketPrice * 0.95, // Use 5% stop loss if none found
-            Account.capitalAvailable,
-            parseFloat(process.env.MAX_RISK_PER_TRADE || "0.02")
+          if (!strategyResult || strategyResult.action === "NEUTRAL") {
+            console.log(
+              `😴 ${market}: ${strategyResult?.reason || "No signal"}`
+            );
+            continue;
+          }
+
+          console.log(
+            `🎯 ${market}: ${strategyResult.action} signal - ${strategyResult.reason}`
           );
 
-          dataset.volume = Math.max(safeVolume, Account.minVolumeDollar);
-          dataset.market = market;
+          // Convert strategy result to legacy format for OrderController
+          const dataset: AnalysisResult = {
+            action: strategyResult.action,
+            entry: strategyResult.entry || marketPrice,
+            marketPrice: strategyResult.marketPrice,
+            volume: strategyResult.volume || Account.minVolumeDollar,
+            market: market,
+            stop: strategyResult.stopLoss || null,
+            target:
+              strategyResult.takeProfit1 || strategyResult.takeProfit || null,
+          };
 
-          if (dataset.action !== "NEUTRAL") {
-            dataset.stop = stopLoss;
-            dataset.target = takeProfit;
-
-            // VALIDATE POSITION WITH RISK MANAGER
-            const validation = await this.riskManager.validateNewPosition(
-              market,
-              dataset.volume!,
-              dataset.entry!,
+          // Calculate safe position size using risk manager if not provided by strategy
+          if (!strategyResult.volume) {
+            const stopLoss =
+              strategyResult.stopLoss ||
+              marketPrice * (strategyResult.action === "LONG" ? 0.95 : 1.05);
+            const safeVolume = this.riskManager.calculateSafePositionSize(
+              marketPrice,
               stopLoss,
               Account.capitalAvailable,
-              positions || [],
-              Account.leverage
+              parseFloat(process.env.MAX_RISK_PER_TRADE || "0.02")
+            );
+            dataset.volume = Math.max(safeVolume, Account.minVolumeDollar);
+          }
+
+          // VALIDATE POSITION WITH RISK MANAGER
+          const validation = await this.riskManager.validateNewPosition(
+            market,
+            dataset.volume!,
+            dataset.entry!,
+            dataset.stop || null,
+            Account.capitalAvailable,
+            positions || [],
+            Account.leverage
+          );
+
+          if (!validation.isValid) {
+            console.log(
+              `❌ Position rejected for ${market}: ${validation.reason}`
             );
 
-            if (!validation.isValid) {
-              console.log(`❌ Position rejected for ${market}: ${validation.reason}`);
-              
-              if (validation.suggestedVolume && validation.suggestedVolume > Account.minVolumeDollar) {
-                console.log(`💡 Using suggested volume: $${validation.suggestedVolume.toFixed(2)}`);
-                dataset.volume = validation.suggestedVolume;
-                
-                // Re-validate with suggested volume
-                const revalidation = await this.riskManager.validateNewPosition(
-                  market,
-                  dataset.volume,
-                  dataset.entry!,
-                  stopLoss,
-                  Account.capitalAvailable,
-                  positions || [],
-                  Account.leverage
-                );
-                
-                if (!revalidation.isValid) {
-                  console.log(`❌ Re-validation failed: ${revalidation.reason}`);
-                  continue; // Skip this trade
-                }
-              } else {
+            if (
+              validation.suggestedVolume &&
+              validation.suggestedVolume > Account.minVolumeDollar
+            ) {
+              console.log(
+                `💡 Using suggested volume: $${validation.suggestedVolume.toFixed(
+                  2
+                )}`
+              );
+              dataset.volume = validation.suggestedVolume;
+
+              // Re-validate with suggested volume
+              const revalidation = await this.riskManager.validateNewPosition(
+                market,
+                dataset.volume,
+                dataset.entry!,
+                dataset.stop || null,
+                Account.capitalAvailable,
+                positions || [],
+                Account.leverage
+              );
+
+              if (!revalidation.isValid) {
+                console.log(`❌ Re-validation failed: ${revalidation.reason}`);
                 continue; // Skip this trade
               }
             } else {
-              console.log(`✅ Position validated for ${market} - Risk: ${validation.riskPercentage?.toFixed(2)}%`);
+              continue; // Skip this trade
             }
+          } else {
+            console.log(
+              `✅ Position validated for ${market} - Risk: ${validation.riskPercentage?.toFixed(
+                2
+              )}%`
+            );
+          }
 
-            const orders = await OrderController.getRecentOpenOrders(market);
+          const orders = await OrderController.getRecentOpenOrders(market);
 
-            if (orders.length > 0) {
-              if (orders[0]!.minutes > 10) {
-                await Order.cancelOpenOrders(market);
-                await OrderController.openOrder(dataset as any);
-              } else {
-                await OrderController.openOrder(dataset as any);
-              }
+          if (orders.length > 0) {
+            if (orders[0]!.minutes > 10) {
+              await Order.cancelOpenOrders(market);
+              await OrderController.openOrder(dataset as any);
             } else {
               await OrderController.openOrder(dataset as any);
             }
+          } else {
+            await OrderController.openOrder(dataset as any);
           }
         }
       }
@@ -232,16 +408,17 @@ class Decision {
       ma[i] !== null &&
       ema[i] !== null
     ) {
-      const prevDiff = ma[iPrev]! - ema[iPrev]!;
+      // Your WORKING JavaScript version
+      const prevDiff = ma[iPrev]! - ema[iPrev]!; // SMA - EMA (SLOW - FAST)
       const currDiff = ma[i]! - ema[i]!;
 
-      // MA cruzou EMA de baixo para cima → LONG
+      // SMA crosses ABOVE EMA → LONG (trend confirmation)
       if (prevDiff <= 0 && currDiff > 0) {
         action = "LONG";
         entry = parseFloat((parsedMarketPrice - entryOffset).toFixed(6));
       }
 
-      // MA cruzou EMA de cima para baixo → SHORT
+      // SMA crosses BELOW EMA → SHORT (trend confirmation)
       else if (prevDiff >= 0 && currDiff < 0) {
         action = "SHORT";
         entry = parseFloat((parsedMarketPrice + entryOffset).toFixed(6));
@@ -311,7 +488,10 @@ class Decision {
   async getCurrentRiskMetrics(): Promise<any> {
     const positions = await Futures.getOpenPositions();
     const account = await AccountController.get();
-    return this.riskManager.getRiskMetrics(positions || [], account.capitalAvailable);
+    return this.riskManager.getRiskMetrics(
+      positions || [],
+      account.capitalAvailable
+    );
   }
 
   /**

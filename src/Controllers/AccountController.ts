@@ -55,7 +55,23 @@ class AccountController {
       parseFloat(Collateral.netEquityAvailable || "0") * leverage;
 
     const maxOpenOrders = parseInt(process.env.LIMIT_ORDER || "1");
-    const minVolumeDollar = capitalAvailable / maxOpenOrders;
+
+    const maxVolumeFromEnv = parseFloat(process.env.MAX_VOLUME_USD || "200");
+    const maxRiskPerTrade = parseFloat(
+      process.env.MAX_RISK_PER_TRADE || "0.01"
+    );
+    // Calculate risk-based maximum volume
+    const riskBasedMaxVolume = capitalAvailable * maxRiskPerTrade; // 1% of $2000 = $20
+    // Use the smaller of: env setting or risk-based calculation
+    const minVolumeDollar = Math.min(maxVolumeFromEnv, riskBasedMaxVolume);
+
+    console.log(`📊 Volume Calculation:
+    - Capital Available: $${capitalAvailable.toFixed(2)}
+    - Max Volume (ENV): $${maxVolumeFromEnv}
+    - Risk-Based Max: $${riskBasedMaxVolume.toFixed(2)} (${
+      maxRiskPerTrade * 100
+    }%)
+    - Final Volume: $${minVolumeDollar.toFixed(2)}`);
 
     const obj: AccountData = {
       maxOpenOrders,

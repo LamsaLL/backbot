@@ -240,7 +240,6 @@ class OrderController {
       symbol,
       orderType: "Limit" as const,
       side: (isLong ? "Ask" : "Bid") as Side,
-      quantity: formatQuantity(quantity),
       postOnly: true,
       reduceOnly: true,
       price: formatPrice(absPrice),

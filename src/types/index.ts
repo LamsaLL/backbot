@@ -45,7 +45,7 @@ export interface OrderData {
   symbol: string;
   orderType: "Market" | "Limit";
   side: "Bid" | "Ask";
-  quantity: string;
+  quantity?: string;
   price?: string;
   triggerPrice?: string;
   triggerQuantity?: string;
